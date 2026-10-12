@@ -6,11 +6,6 @@ Turns hours of tabletop session audio into a searchable, timestamped transcript.
 Pipeline:
     load audio -> find cut points -> export chunks -> Whisper each chunk
     -> stitch segments back onto the original timeline -> write .txt / .json
-
-Two functions are left for you to write (search for "YOUR PART"):
-    find_cut_points()  - where to split the recording
-    stitch_segments()  - put chunk-relative timestamps back on the session timeline
-Everything else is plumbing. `pytest test_transcribe.py` checks your two parts.
 """
 from __future__ import annotations
 
@@ -22,7 +17,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from pydub import AudioSegment
-from pydub.silence import detect_silence  # noqa: F401  (you'll want this)
+from pydub.silence import detect_silence
 
 # Whisper rejects uploads over 25 MB. We aim well under it.
 MAX_UPLOAD_BYTES = 24 * 1024 * 1024
@@ -61,7 +56,7 @@ class Chunk:
 
 
 # --------------------------------------------------------------------------- #
-# YOUR PART 1: where to cut
+# Cutting
 # --------------------------------------------------------------------------- #
 def find_cut_points(
     audio: AudioSegment,
@@ -74,59 +69,72 @@ def find_cut_points(
     Decide where to split `audio` so every chunk fits under Whisper's limit,
     cutting at natural pauses wherever possible.
 
-    Returns the interior cut positions in milliseconds, ascending.
-    Don't include 0 or len(audio). Audio that already fits returns [].
+    Returns the interior cut positions in milliseconds, ascending (no 0 or
+    len(audio)). Every resulting chunk is at most `max_chunk_ms` long.
 
-    Contract (the tests check all of this):
-      * Every chunk -- between 0, each cut, and len(audio) -- is > 0 ms and
-        <= max_chunk_ms long.
-      * Work forward from a cursor (starting at 0). Each new chunk may end
-        anywhere up to cursor + max_chunk_ms.
-      * Look for silence only in the last `search_window_ms` before that
-        limit: [cursor + max_chunk_ms - search_window_ms, cursor + max_chunk_ms].
-        A silence only counts if it is at least `min_silence_ms` long and
-        quieter than `silence_thresh_dbfs`.
-      * If you find one, cut somewhere inside it (the middle is a good choice).
-      * If you don't, fall back to a hard cut at exactly cursor + max_chunk_ms.
-      * The next chunk starts from wherever you actually cut, not from a
-        fixed grid.
-      * Stop once the remaining audio fits in one chunk.
-
-    Hints:
-      * pydub.silence.detect_silence(segment, min_silence_len, silence_thresh)
-        returns [[start_ms, end_ms], ...] relative to the segment you pass in.
-        Slicing first (audio[a:b]) means you have to add `a` back.
-      * Don't run detect_silence over the whole recording. On a 4-hour file
-        it's very slow; you only ever need the window.
-      * Several silences in the window? Your call: the latest gives longer
-        chunks, the longest is the safest place to cut.
+    Walks forward from a cursor. For each chunk, looks for a pause of at least
+    `min_silence_ms` in the last `search_window_ms` before the length limit and
+    cuts in the middle of the longest one. If there's no pause (crosstalk),
+    falls back to a hard cut at the limit.
     """
-    raise NotImplementedError("find_cut_points: your part")
+    cuts = []
+    cursor = 0
+    total = len(audio)
+
+    while total - cursor > max_chunk_ms:
+        limit = cursor + max_chunk_ms
+        window_start = max(cursor + 1, limit - search_window_ms)
+
+        silences = detect_silence(
+            audio[window_start:limit],
+            min_silence_len=min_silence_ms,
+            silence_thresh=silence_thresh_dbfs,
+        )
+
+        if silences:
+            start, end = max(silences, key=lambda s: s[1] - s[0])
+            cut = window_start + (start + end) // 2
+        else:
+            cut = limit
+
+        cuts.append(cut)
+        cursor = cut
+
+    return cuts
 
 
 # --------------------------------------------------------------------------- #
-# YOUR PART 2: stitching timestamps back together
+# Stitching
 # --------------------------------------------------------------------------- #
 def stitch_segments(
     chunks: list[Chunk],
     results: list[list[Segment]],
 ) -> list[Segment]:
     """
-    Whisper returns times relative to the start of each chunk. Map them back
-    onto the original recording and flatten into one list.
+    Map Whisper's chunk-relative segments back onto the original recording
+    and flatten them into one chronological list. `results[i]` holds the
+    segments Whisper returned for `chunks[i]`.
 
-    `results[i]` holds the segments Whisper returned for `chunks[i]`.
-
-    Contract (the tests check all of this):
-      * Shift each segment's start and end by its chunk's start (ms -> seconds).
-      * Strip whitespace from text; drop segments whose text is then empty.
-      * Whisper sometimes reports times past the end of the audio it was
-        given. Clamp each segment's end to its chunk's duration, and drop a
-        segment entirely if it *starts* at or after the chunk's duration.
-      * Return segments in chronological order by start time.
-      * Return new Segment objects; don't mutate the inputs.
+    Strips text and drops empty segments. Whisper sometimes reports times past
+    the end of the audio it was given, so segment ends are clamped to the
+    chunk's duration and segments starting past it are dropped.
     """
-    raise NotImplementedError("stitch_segments: your part")
+    out = []
+    for chunk, segs in zip(chunks, results):
+        offset = chunk.start_ms / 1000
+        duration = chunk.duration_ms / 1000
+
+        for seg in segs:
+            text = seg.text.strip()
+            if not text:
+                continue
+            if seg.start >= duration:
+                continue
+            end = min(seg.end, duration)
+
+            out.append(Segment(seg.start + offset, end + offset, text))
+
+    return sorted(out, key=lambda s: s.start)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,5 @@
 """
-Tests for your two functions. Run with:  pytest -q
+Tests for find_cut_points and stitch_segments. Run with:  pytest -q
 
 They use short synthetic audio (a tone for "talking", digital silence for
 "pauses") with small limits so they run in a second or two:
