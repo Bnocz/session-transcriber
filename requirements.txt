@@ -1,0 +1,5 @@
+openai>=1.40
+pydub>=0.25
+# pydub needs the audioop module, which Python 3.13 removed from the stdlib
+audioop-lts; python_version >= "3.13"
+pytest>=8
